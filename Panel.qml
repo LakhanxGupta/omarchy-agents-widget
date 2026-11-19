@@ -91,11 +91,7 @@ Panel {
           if (row.length > 0) rows.push(row)
         }
       }
-      if (!blankSlate) {
-        var tiles = []
-        for (var j = 0; j < starterPrompts.length; j++) tiles.push({ kind: "starter", index: j })
-        rows.push(tiles)
-      }
+      // Local edit: the starter tiles were replaced by the week chart.
     }
     return rows
   }
@@ -785,6 +781,49 @@ Panel {
     function onStringsChanged() { Qt.callLater(root.showPhrase) }
   }
 
+  // Local edit: tokens per day for the last 7 days, summed across agents,
+  // oldest first, for the week chart under the hero.
+  readonly property var weekDays: {
+    var rev = usage.dataRevision
+    var byDay = {}
+    var providers = usage.enabledProviders
+    for (var i = 0; i < providers.length; i++) {
+      var days = providers[i].recentDays || []
+      for (var d = 0; d < days.length; d++) {
+        var date = String(days[d].date || "")
+        if (date === "") continue
+        byDay[date] = (byDay[date] || 0) + Number(days[d].messageCount || 0)
+      }
+    }
+    // The last 7 local days ending today, so the bars stay on the right days
+    // past midnight and a stale record can't shift the window.
+    var now = new Date(root.nowMs)
+    var out = []
+    for (var offset = 6; offset >= 0; offset--) {
+      var day = new Date(now.getFullYear(), now.getMonth(), now.getDate() - offset)
+      var key = Qt.formatDate(day, "yyyy-MM-dd")
+      out.push({ date: key, tokens: byDay[key] || 0 })
+    }
+    return out
+  }
+  readonly property real weekTotal: weekDays.reduce(function(sum, day) { return sum + day.tokens }, 0)
+  // Local edit: every token on record (modelUsage holds lifetime totals).
+  readonly property real allTimeTotal: {
+    var rev = usage.dataRevision
+    var total = 0
+    var providers = usage.enabledProviders
+    for (var i = 0; i < providers.length; i++) {
+      var models = providers[i].modelUsage || {}
+      for (var id in models) {
+        var b = models[id] || {}
+        total += Number(b.inputTokens || 0) + Number(b.outputTokens || 0)
+          + Number(b.cacheReadInputTokens || 0) + Number(b.cacheCreationInputTokens || 0)
+      }
+    }
+    return total
+  }
+  readonly property real weekMax: weekDays.reduce(function(max, day) { return Math.max(max, day.tokens) }, 0)
+
   function dayName(date) {
     var parsed = new Date(String(date || "") + "T00:00:00")
     if (isNaN(parsed.getTime())) return String(date || "")
@@ -1057,6 +1096,7 @@ Panel {
             foreground: root.foreground
             fontFamily: root.fontFamily
 
+
             iconComponent: Component {
               Text {
                 textFormat: Text.PlainText
@@ -1093,7 +1133,6 @@ Panel {
               }
             }
           }
-
           AddView {
             visible: root.addStage !== "" || root.blankSlate
             width: column.width
@@ -1112,40 +1151,130 @@ Panel {
             }
           }
 
-          // ---------- Make something ----------
+          // ---------- Local edit: week chart (was Make something cool) ----------
           PanelSeparator {
-            visible: root.addStage === "" && !root.blankSlate
+            visible: root.addStage === "" && !root.blankSlate && (root.weekTotal > 0 || root.allTimeTotal > 0)
             foreground: root.foreground
           }
 
+          // ---------- Local edit: this week's tokens, one bar per day ----------
           Column {
-            visible: root.addStage === "" && !root.blankSlate
+            id: weekChart
+            visible: root.addStage === "" && !root.blankSlate && (root.weekTotal > 0 || root.allTimeTotal > 0)
             width: parent.width
-            spacing: Style.space(12)
+            spacing: Style.space(8)
 
-            PanelSectionHeader {
-              text: Commons.I18n.t("agents.makeSomethingCool")
-              foreground: root.foreground
-              fontFamily: root.fontFamily
+            Item {
+              width: parent.width
+              implicitHeight: weekTitle.implicitHeight
+
+              Row {
+                anchors.left: parent.left
+                spacing: Style.space(6)
+
+                Text {
+                  id: weekTitle
+                  textFormat: Text.PlainText
+                  text: "This week"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: usage.formatTokenCount(root.weekTotal)
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+
+              Row {
+                anchors.right: parent.right
+                spacing: Style.space(6)
+                visible: root.allTimeTotal > 0
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: "All time"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: usage.formatTokenCount(root.allTimeTotal)
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
             }
 
             Row {
-              id: tileRow
+              id: weekBars
               width: parent.width
-              spacing: Style.space(10)
+              spacing: Style.space(6)
+              readonly property real barWidth: root.weekDays.length > 0
+                ? (width - spacing * (root.weekDays.length - 1)) / root.weekDays.length : 0
+              readonly property real barArea: Style.space(44)
 
               Repeater {
-                model: root.starterPrompts
+                model: root.weekDays
 
-                StarterTile {
+                Column {
+                  id: dayColumn
                   required property var modelData
                   required property int index
-                  hasCursor: root.hasKey("starter", index)
-                  onHovered: root.pointAt("starter", index)
-                  width: (tileRow.width - tileRow.spacing * 2) / 3
-                  glyph: modelData.glyph
-                  title: modelData.label
-                  onClicked: root.startPrompt(modelData.prompt)
+                  readonly property bool isToday: index === root.weekDays.length - 1
+                  width: weekBars.barWidth
+                  spacing: Style.space(4)
+
+                  HoverHandler { id: dayHover }
+
+                  PanelToolTip {
+                    visible: dayHover.hovered
+                    text: root.dayName(dayColumn.modelData.date) + ": "
+                      + usage.formatTokenCount(dayColumn.modelData.tokens) + " tokens"
+                  }
+
+                  Item {
+                    width: parent.width
+                    height: weekBars.barArea
+
+                    Rectangle {
+                      anchors.fill: parent
+                      radius: Math.min(Style.cornerRadius, width / 2)
+                      color: root.track
+                    }
+
+                    Rectangle {
+                      anchors.bottom: parent.bottom
+                      width: parent.width
+                      height: root.weekMax > 0 && dayColumn.modelData.tokens > 0
+                        ? Math.max(2, parent.height * dayColumn.modelData.tokens / root.weekMax) : 0
+                      radius: Math.min(Style.cornerRadius, width / 2)
+                      color: dayColumn.isToday ? Commons.Color.accent : root.foreground
+                      opacity: dayHover.hovered || dayColumn.isToday ? 1.0 : 0.75
+
+                      Behavior on height {
+                        NumberAnimation { duration: Style.duration(160); easing.type: Easing.OutCubic }
+                      }
+                    }
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    width: parent.width
+                    horizontalAlignment: Text.AlignHCenter
+                    text: root.dayName(dayColumn.modelData.date).charAt(0)
+                    color: dayColumn.isToday ? root.foreground : root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: dayColumn.isToday
+                  }
                 }
               }
             }
